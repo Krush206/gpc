@@ -1,0 +1,225 @@
+#!/bin/sh
+
+# modern-build -- Build GNU Pascal (GPC) on a modern Unix/Linux system.
+#
+# GPC is a front-end for GCC: it is built *inside* a GCC source tree,
+# against GCC's internals. The last GCC versions GPC supports are the
+# 4.0.x series (see p/diffs/). Building those with a current host
+# toolchain (GCC >= 10, glibc >= 2.28, binutils >= 2.35, PIE by
+# default, multiarch library layout) requires a few adjustments which
+# this script and the accompanying patches take care of:
+#
+#   * CFLAGS that work for both the host compiler and the freshly
+#     built GCC 4.0.3: -std=gnu89 restores the 2006-era `extern
+#     inline' semantics (without it, toplev.h emits duplicate
+#     floor_log2/exact_log2 definitions into every object) and
+#     downgrades the modern hard errors for implicit declarations;
+#     -fcommon is needed because GCC 10+ changed the default for
+#     tentative definitions.
+#   * p/modern/gcc-<version>-modern-host.diff fixes glibc >= 2.28
+#     API changes (ucontext_t, siginfo_t) in libgcc's unwinder.
+#   * The system crt objects and libc.so linker script are placed in
+#     $prefix/<target>/lib (and lib/32 for multilib), which the
+#     freshly built compiler searches via its -B prefixes; without
+#     this it cannot find crti.o on multiarch systems (/usr/lib64
+#     no longer exists there).
+#   * `make -j' is safe: p/Make-lang.in declares the generated-header
+#     prerequisites for the front-end objects, and p/rts/Makefile.in
+#     forces a serial RTS build (GPC's automake is not thread-safe).
+#
+# Everything is built out of tree; only the downloads, the patched
+# GCC sources and the build directory are written to the workdir.
+#
+# Usage: modern-build [options]
+#   --prefix=DIR      install prefix (default: /usr/local/gpc)
+#   --workdir=DIR     scratch directory for sources and build
+#                     (default: ./gpc-modern-build under the current
+#                     directory)
+#   --jobs=N          parallel make jobs (default: number of CPUs)
+#   --gcc-version=V   GCC version to build against (default: 4.0.3;
+#                     must have p/diffs/gcc-V.diff)
+#   --fresh           delete the workdir before building
+#   --no-download     don't download GCC (use existing tarball)
+#   --no-install      build, but do not install
+#   -h, --help        show this help
+#
+# Requirements: a C compiler, GNU make, patch, tar, bzip2 and
+# curl or wget. makeinfo and help2man are optional (without them the
+# documentation and man pages are skipped or stubbed).
+#
+# After installation, compile Pascal programs with
+#      gpc --automake program.pas
+# (--automake makes GPC compile used units on demand; this is GPC's
+# normal mode of operation, not a quirk of this build).
+#
+# Copyright (C) 2026 Free Software Foundation, Inc.
+#
+# This file is part of GNU Pascal.
+#
+# GNU Pascal is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published
+# by the Free Software Foundation; either version 2, or (at your
+# option) any later version.
+
+# This script requires bash (like the other GPC build scripts). Since
+# bash cannot be assumed to be in /bin, re-run with bash if needed.
+if [ x"$BASH" = x ]; then
+  if [ x"$RERUN_BASH_TRIED" != x ]; then
+    echo "`basename "$0"`: cannot run, \`bash' is either not bash or a very old version" >&2
+    exit 1
+  else
+    RERUN_BASH_TRIED=1; export RERUN_BASH_TRIED
+    exec bash "$0" "$@"
+  fi
+fi
+RERUN_BASH_TRIED=""
+
+set -e
+
+# The GPC source tree (the directory containing this script's parent).
+script=`dirname "$0"`
+GPC_SRCDIR=`cd "$script/.." && pwd`
+
+# Defaults.
+gcc_version=4.0.3
+prefix=/usr/local/gpc
+workdir="$PWD/gpc-modern-build"
+jobs=2
+case `nproc 2>/dev/null` in
+  ''|*[!0-9]*) ;;
+  *) jobs=`nproc` ;;
+esac
+fresh=no
+download=yes
+install=yes
+
+# Checksums of the GCC core tarballs we know about.
+case $gcc_version in
+  4.0.3) gcc_sha256=96a908cd759c7949e807700b7d42acd515b0b7732269c2bb2209f235e1cee590 ;;
+  *) gcc_sha256= ;;
+esac
+
+show_help ()
+{
+  sed -n '/^# Usage:/,/^# (--automake/p' "$0" | sed -e 's,^# ,,;s,^#,,' | head -n -1
+}
+
+while [ x"$1" != x ]; do
+  case "$1" in
+    --prefix=*) prefix=${1#--prefix=} ;;
+    --workdir=*) workdir=${1#--workdir=} ;;
+    --jobs=*) jobs=${1#--jobs=} ;;
+    --gcc-version=*) gcc_version=${1#--gcc-version=} ;;
+    --fresh) fresh=yes ;;
+    --no-download) download=no ;;
+    --no-install) install=no ;;
+    -h|--help) show_help; exit 0 ;;
+    *) echo "`basename "$0"`: unknown option: $1 (try --help)" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+CFLAGS="-O2 -g -fcommon -fno-strict-aliasing -std=gnu89"
+
+gcc_tar=gcc-core-$gcc_version.tar.bz2
+gcc_url=https://ftp.gnu.org/gnu/gcc/gcc-$gcc_version/$gcc_tar
+gcc_dir=gcc-$gcc_version
+# Paths relative to the GPC tree ...
+gcc_diff=diffs/gcc-$gcc_version.diff
+host_diff=modern/gcc-$gcc_version-modern-host.diff
+# ... and the corresponding paths inside the grafted GCC tree
+# (where gcc/p is this GPC source tree).
+gcc_diff_in_gcc=gcc/p/diffs/gcc-$gcc_version.diff
+host_diff_in_gcc=gcc/p/modern/gcc-$gcc_version-modern-host.diff
+
+[ -r "$GPC_SRCDIR/$gcc_diff" ] || { echo "`basename "$0"`: no GPC patch for gcc-$gcc_version ($gcc_diff)" >&2; exit 1; }
+
+# Requirements.
+for tool in sh make patch tar bzip2; do command -v $tool > /dev/null || { echo "missing tool: $tool" >&2; exit 1; }; done
+if [ x$download = xyes ]; then command -v curl > /dev/null || command -v wget > /dev/null || { echo "missing tool: curl or wget" >&2; exit 1; }; fi
+
+mkdir -p "$workdir"
+[ x$fresh = xyes ] && rm -rf "$workdir/$gcc_dir" "$workdir/build"
+cd "$workdir"
+
+# 1. Fetch the GCC sources.
+if [ x$download = xyes ] && [ ! -r $gcc_tar ]; then
+  echo "Downloading $gcc_url"
+  if command -v curl > /dev/null; then curl -sSLO "$gcc_url"
+  else wget -q "$gcc_url"; fi
+fi
+[ -r $gcc_tar ] || { echo "`basename "$0"`: $gcc_tar not found (see --no-download)" >&2; exit 1; }
+if [ x"$gcc_sha256" != x ]; then
+  echo "$gcc_sha256  $gcc_tar" | sha256sum -c --status - 2> /dev/null || { echo "checksum mismatch for $gcc_tar" >&2; exit 1; }
+fi
+
+# 2. Unpack, graft in the GPC sources, patch.
+if [ ! -d $gcc_dir/gcc/p ]; then
+  [ -d $gcc_dir ] || { echo "Unpacking $gcc_tar"; bzip2 -c -d $gcc_tar | tar xf -; }
+  if [ -e $gcc_dir/gcc/p ]; then rm -rf $gcc_dir/gcc/p; fi
+  ln -s "$GPC_SRCDIR" $gcc_dir/gcc/p
+  echo "Applying GPC's patch for gcc-$gcc_version"
+  (cd $gcc_dir && patch -s -p0 < "$gcc_diff_in_gcc")
+  if [ -r "$GPC_SRCDIR/$host_diff" ]; then
+    echo "Applying the modern-host patch for gcc-$gcc_version"
+    (cd $gcc_dir && patch -s -p0 < "$host_diff_in_gcc")
+  fi
+fi
+
+# 3. Determine the target and provide the system crt objects and
+#    libc.so linker script where the freshly built compiler will
+#    find them (via its -B search of $prefix/<target>/lib).
+target=`sh $gcc_dir/config.guess`
+[ x"$target" != x ] || { echo "cannot determine target" >&2; exit 1; }
+mkdir -p "$prefix/$target/lib"
+case `uname -m` in
+  x86_64)
+    if [ -r /usr/lib/x86_64-linux-gnu/crt1.o ]; then
+      cp -a /usr/lib/x86_64-linux-gnu/{crt1.o,crti.o,crtn.o,libc.so} "$prefix/$target/lib/" 2> /dev/null || true
+    else
+      cp -a /usr/lib64/{crt1.o,crti.o,crtn.o,libc.so} "$prefix/$target/lib/" 2> /dev/null || true
+    fi
+    if [ -r /usr/lib32/crti.o ]; then
+      mkdir -p "$prefix/$target/lib/32"
+      cp -a /usr/lib32/{crt1.o,crti.o,crtn.o,libc.so} "$prefix/$target/lib/32/" 2> /dev/null || true
+    fi
+    ;;
+  *)
+    cp -a /usr/lib*/crt1.o /usr/lib*/crti.o /usr/lib*/crtn.o /usr/lib*/libc.so "$prefix/$target/lib/" 2> /dev/null || true
+    ;;
+esac
+
+# 4. Configure (out of tree).
+mkdir -p build
+cd build
+if [ ! -r Makefile ]; then
+  echo "Configuring for target $target, prefix $prefix"
+  CFLAGS="$CFLAGS" CONFIG_SHELL=/bin/bash bash "$workdir/$gcc_dir/configure" \
+    --prefix="$prefix" --enable-languages=c,pascal \
+    --disable-bootstrap --disable-nls < /dev/null
+fi
+
+# 5. Build. Always invoke make from the top level only (the gcc
+#    subdirectory's Makefile does not carry the right CFLAGS).
+make -j$jobs CFLAGS="$CFLAGS"
+
+# 6. Install (this also installs the GPC units and utilities).
+if [ x$install = xyes ]; then
+  make -j$jobs CFLAGS="$CFLAGS" install
+  echo "Installed GNU Pascal under $prefix."
+fi
+
+# 7. Sanity check.
+if [ x$install = xyes ]; then
+  tmp=`mktemp -d`
+  cat > "$tmp/hello.pas" <<'EOF'
+program Hello;
+begin
+  WriteLn ('Hello from GNU Pascal!')
+end.
+EOF
+  "$prefix/bin/gpc" --automake "$tmp/hello.pas" -o "$tmp/hello" && "$tmp/hello"
+  rm -rf "$tmp"
+fi
+
+echo "Done."
