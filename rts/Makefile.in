@@ -30,6 +30,12 @@ srcdir=@srcdir@
 # gcc-3 does, but it should not matter to set it here again.
 STAMP=echo timestamp >
 
+# The RTS is built with GPC's `--automake' which is not safe to run
+# concurrently (several gpc1 instances would simultaneously generate
+# the same .gpi files and read them half-written, e.g. rtsc.gpi).
+# Force a serial build of the RTS, even under `make -j'.
+.NOTPARALLEL:
+
 GCC2GPC=sed 's,^\([^ ]*[/\][^/\]*\)gcc,\1gpc,;s/^gcc$$/gpc/' # $(CC) might be .../gcc-foo/.../xgcc
 
 # Reasonable default values, toplevel Makefile overrides them.
