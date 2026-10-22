@@ -1,0 +1,98 @@
+README -- Building GNU Pascal on modern Unix/Linux systems
+==========================================================
+
+The GPC sources in this directory ("p/") are a front-end for GCC:
+they are grafted into a GCC source tree (`gcc/p/`) and built as part
+of GCC.  The last GCC versions GPC supports are the 4.0.x series
+(see ../diffs/ for the patches to each supported version).
+
+That makes building GPC on a current Unix/Linux system a two-part
+problem: (1) build GCC 4.0.3 with a modern host toolchain, and
+(2) keep GPC's own build machinery working with current tools.
+Both are solved here:
+
+The build script
+----------------
+
+        p/script/modern-build [--prefix=DIR] [--workdir=DIR] [--jobs=N]
+
+downloads the matching GCC "core" sources, grafts this p/ directory
+into them, applies GPC's own patch plus the host-compatibility patch
+from this directory, builds and installs everything, and runs a
+smoke test.  It is safe to re-run; completed steps are skipped.
+
+Example:
+
+        p/script/modern-build --prefix=$HOME/gpc --jobs=8
+
+Afterwards, compile Pascal programs with
+
+        gpc --automake program.pas
+
+(--automake tells GPC to compile used units on demand; this is
+GPC's normal way of working.  Used units whose sources are not
+installed under the prefix are compiled into the current
+directory.)
+
+What was adapted, and why
+--------------------------
+
+Host toolchain (GCC >= 10 as the build compiler):
+
+  * CFLAGS used for the whole build: `-O2 -g -fcommon
+    -fno-strict-aliasing -std=gnu89'.  `-std=gnu89' is essential:
+    GCC's C default changed from gnu89 to gnu17 and later, and with
+    it the semantics of `extern inline' (toplev.h would otherwise
+    emit duplicate definitions of floor_log2/exact_log2 into every
+    object) and the tolerance of implicit declarations in 2006-era
+    autoconf tests.  `-fcommon' restores the pre-GCC-10 handling of
+    tentative definitions which the old sources rely on.
+
+  * p/Make-lang.in: the front-end object rules now declare the
+    generated headers they include (insn-constants.h, tree-check.h,
+    insn-modes.h, gtype-desc.h, gcov-iov.h and the gt-p-*.h files)
+    as prerequisites, conditionally for GCC 4.x.  Without this,
+    `make -j' compiles GPC's sources before the generator programs
+    have produced those headers.  The variables must be defined
+    before the first rule that uses them because GNU make expands
+    prerequisite lists while reading a rule.
+
+  * p/rts/Makefile.in: the run time system is built with `.NOTPARALLEL'
+    because GPC's automake facility is not safe to run concurrently
+    (parallel gpc1 instances would truncate .gpi files such as
+    rtsc.gpi while reading and writing them at the same time).
+
+Host system (current glibc/binutils/distro layout):
+
+  * p/modern/gcc-4.0.3-modern-host.diff: glibc >= 2.28 renamed
+    `struct ucontext' to `ucontext_t' and `struct siginfo' to
+    `siginfo_t'; libgcc's unwinder (gcc/config/i386/linux-unwind.h)
+    uses both and no longer compiles otherwise.
+
+  * The build script installs the system's crt1.o/crti.o/crtn.o and
+    the libc.so linker script into $prefix/<target>/lib (and lib/32
+    for multilib builds).  GCC 4.0.3 searches /usr/lib64 etc., which
+    do not exist on multiarch distributions; the -B search paths it
+    does use cover the prefix, which also makes user programs link
+    correctly after installation.
+
+  * The one-shot prompts in p/config-lang.in (which patches GCC from
+    configure) are fed from /dev/null by the build script.
+
+Notes
+-----
+
+  * Documentation (Info files) and man pages are built only if
+    makeinfo and help2man are installed; the 2006 texinfo sources
+    may not satisfy current makeinfo.  Man page failures during
+    `make install' are ignored by GCC's Makefile, as are the doc
+    stubs created by the bundled `missing' script.
+
+  * The compiler defaults to 64-bit code generation on x86_64; a
+    multilib build also provides 32-bit support if the host has the
+    32-bit development files (e.g. libc6-dev-i386 on Debian and
+    derivatives).
+
+  * Known-good combination: GCC 4.0.3 with this patch set, built by
+    GCC 14.2 on Devuan 6 (glibc 2.41, binutils 2.44), x86_64.
+    The same recipe should work with any reasonably recent host.
