@@ -1,0 +1,30 @@
+# Host compatibility fixes for building GCC 4.0.3 (and with it, GNU
+# Pascal) on modern Unix/Linux systems with a current glibc.
+# Apply after p/diffs/gcc-4.0.3.diff, from the GCC source root:
+#   patch -s -p0 < gcc/p/modern/gcc-4.0.3-modern-host.diff
+
+--- gcc/config/i386/linux-unwind.h.orig
++++ gcc/config/i386/linux-unwind.h
+@@ -51,7 +51,7 @@
+   if (*(unsigned char *)(pc+0) == 0x48
+       && *(unsigned long *)(pc+1) == 0x050f0000000fc0c7)
+     {
+-      struct ucontext *uc_ = context->cfa;
++      ucontext_t *uc_ = context->cfa;
+       sc = (struct sigcontext *) &uc_->uc_mcontext;
+     }
+   else
+@@ -133,10 +133,10 @@
+     {
+       struct rt_sigframe {
+ 	int sig;
+-	struct siginfo *pinfo;
++	siginfo_t *pinfo;
+ 	void *puc;
+-	struct siginfo info;
+-	struct ucontext uc;
++	siginfo_t info;
++	ucontext_t uc;
+       } *rt_ = context->cfa;
+       sc = (struct sigcontext *) &rt_->uc.uc_mcontext;
+     }
