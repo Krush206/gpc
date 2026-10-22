@@ -1,0 +1,37 @@
+# Build artifacts (see p/script/modern-build for the modern build)
+*.o
+*.a
+*.so
+*.gpi
+*.exe
+core
+
+# Generated during configure/build (p/ is grafted into a GCC tree)
+diffs/gcc-3.4.6.diff
+handle-opts.c
+gpc-run
+doc/info/
+doc/generated/
+
+# Run time system build artifacts (p/rts is configured and built in place)
+rts/Makefile
+rts/config.cache
+rts/config.log
+rts/config.status
+rts/confdefs.h
+rts/rtsc
+rts/rts-config.h
+rts/libgpc.a
+rts/libgpc.so*
+
+# Utilities built in place (p/utils)
+utils/binobj
+utils/gpidump
+utils/no-man
+utils/tree.inc
+
+# Test suite scratch files
+test/*.log
+test/*.o
+test/a.out
+test/demo
